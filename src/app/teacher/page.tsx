@@ -86,17 +86,31 @@ export default function TeacherPage() {
       return;
     }
 
-    const { data: profiles, error: profilesError } = await supabase
-      .from("profiles")
-      .select("id, full_name")
-      .in("id", ids);
 
-    if (profilesError) {
-      setMessage("Could not load student profiles: " + profilesError.message);
-      return;
-    }
+const { data: profiles, error: profilesError } = await supabase
+  .rpc("get_my_course_students");
 
-    setStudents((profiles ?? []) as Student[]);
+if (profilesError) {
+  setMessage("Could not load student names: " + profilesError.message);
+  return;
+}
+
+type CourseStudent = {
+  student_id: string;
+  full_name: string | null;
+  course_id: string;
+};
+
+const courseStudents = (profiles ?? []).filter(
+  (student: CourseStudent) => student.course_id === selectedCourse
+);
+
+setStudents(
+  courseStudents.map((student: CourseStudent) => ({
+    id: student.student_id,
+    full_name: student.full_name,
+  }))
+);
 
     const { data: records, error: attendanceError } = await supabase
       .from("attendance")
