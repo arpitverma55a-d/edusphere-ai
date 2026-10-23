@@ -266,6 +266,12 @@ export default function StudentPage() {
             >
               My Profile
             </button>
+            <button
+  onClick={() => router.push("/announcements")}
+  className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500"
+>
+  📢 Announcements
+</button>
 
             <button
               onClick={refreshDashboard}

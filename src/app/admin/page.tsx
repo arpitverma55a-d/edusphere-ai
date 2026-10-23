@@ -182,6 +182,12 @@ export default function AdminPage() {
 
           <div className="flex gap-3">
             <button
+  onClick={() => { window.location.href = "/announcements"; }}
+  className="rounded-xl bg-cyan-600 px-4 py-2 font-semibold text-white hover:bg-cyan-500"
+>
+  📢 Announcements
+</button>
+            <button
               onClick={() => void loadDashboard()}
               className="rounded-xl border border-slate-700 px-4 py-2 hover:bg-slate-800"
             >

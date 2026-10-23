@@ -390,6 +390,16 @@ export default function TeacherPage() {
             Manage courses, enrollments, attendance, and assignments.
           </p>
         </div>
+        
+<button
+  onClick={() => {
+    window.location.href = "/announcements";
+  }}
+  className="rounded-lg bg-blue-700 px-4 py-2 font-semibold text-white hover:bg-blue-800"
+>
+  📢 Announcements
+</button>
+
         <button
           onClick={signOut}
           className="rounded-lg border px-4 py-2"
