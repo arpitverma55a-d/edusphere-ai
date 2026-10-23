@@ -258,7 +258,15 @@ export default function StudentPage() {
             </p>
           </div>
 
-          <div className="flex gap-3">
+
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={() => router.push("/student/profile")}
+              className="rounded-lg border border-cyan-400 px-4 py-2 text-sm font-semibold text-cyan-300 hover:bg-cyan-400/10"
+            >
+              My Profile
+            </button>
+
             <button
               onClick={refreshDashboard}
               disabled={refreshing}
@@ -266,6 +274,7 @@ export default function StudentPage() {
             >
               {refreshing ? "Refreshing..." : "Refresh"}
             </button>
+
             <button
               onClick={signOut}
               className="rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-300"
