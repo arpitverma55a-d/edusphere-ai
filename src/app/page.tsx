@@ -5,12 +5,12 @@ const features = [
   {
     title: "Student Portal",
     description: "View marks, attendance, and assignments.",
-    href: "/student",
+    href: "/login",
   },
   {
     title: "Teacher Portal",
     description: "Manage classes, attendance, and assignments.",
-    href: "/teacher",
+    href: "/login?role=teacher",
   },
   {
     title: "AI Helpdesk",
