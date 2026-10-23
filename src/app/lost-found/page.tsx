@@ -11,8 +11,12 @@ type LostFoundItem = {
   description: string | null;
   item_type: string;
   location: string | null;
+  image_url: string | null;
   created_at: string;
 };
+
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
 export default function LostFoundPage() {
   const [items, setItems] = useState<LostFoundItem[]>([]);
@@ -27,6 +31,8 @@ export default function LostFoundPage() {
   const [description, setDescription] = useState("");
   const [itemType, setItemType] = useState("lost");
   const [location, setLocation] = useState("");
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState("");
 
   const supabase = createClient();
 
@@ -37,12 +43,12 @@ export default function LostFoundPage() {
     const { data, error: fetchError } = await supabase
       .from("lost_found_items")
       .select(
-        "id, reported_by, title, description, item_type, location, created_at"
+        "id, reported_by, title, description, item_type, location, image_url, created_at"
       )
       .order("created_at", { ascending: false });
 
     if (fetchError) {
-      setError(fetchError.message);
+      setError(`Could not load reports: ${fetchError.message}`);
       setItems([]);
     } else {
       setItems((data ?? []) as LostFoundItem[]);
@@ -53,70 +59,144 @@ export default function LostFoundPage() {
 
   useEffect(() => {
     void loadItems();
-    // Load reports when the page opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function handlePhotoChange(file: File | null) {
+    setError("");
+    setPhotoPreview("");
+
+    if (!file) {
+      setPhoto(null);
+      return;
+    }
+
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      setPhoto(null);
+      setError("Choose a JPG, PNG, or WebP image.");
+      return;
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      setPhoto(null);
+      setError("The photo must be 5 MB or smaller.");
+      return;
+    }
+
+    setPhoto(file);
+    setPhotoPreview(URL.createObjectURL(file));
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setNotice("");
 
-    const cleanTitle = title.trim();
-
-    if (!cleanTitle) {
+    if (!title.trim()) {
       setError("Please enter the item name.");
       return;
     }
 
     setSubmitting(true);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    let uploadedPath: string | null = null;
 
-    if (authError || !user) {
-      setError("Please sign in before reporting an item.");
+    try {
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+
+      if (authError || !user) {
+        throw new Error("Please sign in before reporting an item.");
+      }
+
+      let imageUrl: string | null = null;
+
+      if (photo) {
+        const extension =
+          photo.type === "image/jpeg"
+            ? "jpg"
+            : photo.type === "image/png"
+              ? "png"
+              : "webp";
+
+        const filePath = `${user.id}/${crypto.randomUUID()}.${extension}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from("lost-found-photos")
+          .upload(filePath, photo, {
+            contentType: photo.type,
+            cacheControl: "3600",
+            upsert: false,
+          });
+
+        if (uploadError) {
+          throw new Error(`Photo upload failed: ${uploadError.message}`);
+        }
+
+        uploadedPath = filePath;
+
+        const { data: publicUrlData } = supabase.storage
+          .from("lost-found-photos")
+          .getPublicUrl(filePath);
+
+        imageUrl = publicUrlData.publicUrl;
+      }
+
+      const { error: insertError } = await supabase
+        .from("lost_found_items")
+        .insert({
+          reported_by: user.id,
+          title: title.trim(),
+          description: description.trim() || null,
+          item_type: itemType,
+          location: location.trim() || null,
+          image_url: imageUrl,
+        });
+
+      if (insertError) {
+        // If saving the report fails, clean up the uploaded photo.
+        if (uploadedPath) {
+          await supabase.storage
+            .from("lost-found-photos")
+            .remove([uploadedPath]);
+        }
+
+        throw new Error(`Could not save the report: ${insertError.message}`);
+      }
+
+      setTitle("");
+      setDescription("");
+      setLocation("");
+      setItemType("lost");
+      setPhoto(null);
+      setPhotoPreview("");
+      setNotice("Your report and photo were submitted successfully!");
+
+      await loadItems();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong. Please try again."
+      );
+    } finally {
       setSubmitting(false);
-      return;
     }
-
-    const { error: insertError } = await supabase
-      .from("lost_found_items")
-      .insert({
-        reported_by: user.id,
-        title: cleanTitle,
-        description: description.trim() || null,
-        item_type: itemType,
-        location: location.trim() || null,
-      });
-
-    if (insertError) {
-      setError(insertError.message);
-      setSubmitting(false);
-      return;
-    }
-
-    setTitle("");
-    setDescription("");
-    setLocation("");
-    setItemType("lost");
-    setNotice("Your report was submitted successfully!");
-
-    await loadItems();
-    setSubmitting(false);
   }
 
   const filteredItems = items.filter((item) => {
     const matchesType =
-      filter === "all" ||
-      item.item_type.toLowerCase() === filter;
+      filter === "all" || item.item_type.toLowerCase() === filter;
 
     const searchableText =
       `${item.title} ${item.description ?? ""} ${item.location ?? ""}`.toLowerCase();
 
-    return matchesType && searchableText.includes(search.toLowerCase().trim());
+    return (
+      matchesType &&
+      searchableText.includes(search.toLowerCase().trim())
+    );
   });
 
   return (
@@ -127,7 +207,9 @@ export default function LostFoundPage() {
             <p className="text-sm font-semibold uppercase tracking-wider text-blue-600">
               EduSphere AI
             </p>
-            <h1 className="mt-2 text-3xl font-bold">Lost & Found Portal</h1>
+            <h1 className="mt-2 text-3xl font-bold">
+              Lost &amp; Found Portal
+            </h1>
             <p className="mt-2 text-slate-500">
               Help campus belongings find their way home.
             </p>
@@ -145,7 +227,7 @@ export default function LostFoundPage() {
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-xl font-bold">Report an item</h2>
             <p className="mt-1 text-sm text-slate-500">
-              Share enough details to help someone identify the item.
+              Add a description and an optional photo.
             </p>
 
             <form onSubmit={handleSubmit} className="mt-6 space-y-4">
@@ -157,7 +239,7 @@ export default function LostFoundPage() {
                   id="item-type"
                   value={itemType}
                   onChange={(event) => setItemType(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white p-3 outline-none focus:border-blue-500"
+                  className="w-full rounded-xl border border-slate-200 bg-white p-3"
                 >
                   <option value="lost">I lost something</option>
                   <option value="found">I found something</option>
@@ -175,7 +257,7 @@ export default function LostFoundPage() {
                   value={title}
                   onChange={(event) => setTitle(event.target.value)}
                   placeholder="e.g. Blue water bottle"
-                  className="w-full rounded-xl border border-slate-200 p-3 outline-none focus:border-blue-500"
+                  className="w-full rounded-xl border border-slate-200 p-3"
                 />
               </div>
 
@@ -185,12 +267,12 @@ export default function LostFoundPage() {
                 </label>
                 <textarea
                   id="item-description"
-                  rows={4}
+                  rows={3}
                   maxLength={2000}
                   value={description}
                   onChange={(event) => setDescription(event.target.value)}
                   placeholder="Color, brand, identifying details..."
-                  className="w-full rounded-xl border border-slate-200 p-3 outline-none focus:border-blue-500"
+                  className="w-full rounded-xl border border-slate-200 p-3"
                 />
               </div>
 
@@ -204,8 +286,54 @@ export default function LostFoundPage() {
                   value={location}
                   onChange={(event) => setLocation(event.target.value)}
                   placeholder="e.g. Library, second floor"
-                  className="w-full rounded-xl border border-slate-200 p-3 outline-none focus:border-blue-500"
+                  className="w-full rounded-xl border border-slate-200 p-3"
                 />
+              </div>
+
+              <div>
+                <label htmlFor="item-photo" className="mb-2 block text-sm font-medium">
+                  Item photo (optional)
+                </label>
+                <input
+                  id="item-photo"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  disabled={submitting}
+                  onChange={(event) =>
+                    handlePhotoChange(event.target.files?.[0] ?? null)
+                  }
+                  className="block w-full rounded-xl border border-slate-200 p-3 text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-blue-50 file:px-3 file:py-2 file:font-medium file:text-blue-700"
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  JPG, PNG, or WebP. Maximum size: 5 MB.
+                </p>
+
+                {photoPreview && (
+                  <div className="mt-3">
+                    <p className="mb-2 text-sm font-medium">Photo preview</p>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={photoPreview}
+                      alt="Preview of the selected item"
+                      className="max-h-56 w-full rounded-xl border border-slate-200 object-contain"
+                    />
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={() => {
+                        setPhoto(null);
+                        setPhotoPreview("");
+                        const inputElement = document.getElementById(
+                          "item-photo"
+                        ) as HTMLInputElement | null;
+                        if (inputElement) inputElement.value = "";
+                      }}
+                      className="mt-2 text-sm font-medium text-red-600 hover:underline"
+                    >
+                      Remove photo
+                    </button>
+                  </div>
+                )}
               </div>
 
               {error && (
@@ -245,7 +373,7 @@ export default function LostFoundPage() {
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search item, description, or location..."
-                className="mt-4 w-full rounded-xl border border-slate-200 p-3 outline-none focus:border-blue-500"
+                className="mt-4 w-full rounded-xl border border-slate-200 p-3"
               />
 
               <div className="mt-3 flex flex-wrap gap-2">
@@ -288,36 +416,48 @@ export default function LostFoundPage() {
                 {filteredItems.map((item) => (
                   <article
                     key={item.id}
-                    className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+                    className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
                   >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <h3 className="text-lg font-bold">{item.title}</h3>
-                      <span
-                        className={`rounded-full px-3 py-1 text-xs font-bold uppercase ${
-                          item.item_type.toLowerCase() === "found"
-                            ? "bg-green-100 text-green-700"
-                            : "bg-amber-100 text-amber-700"
-                        }`}
-                      >
-                        {item.item_type}
-                      </span>
+                    {item.image_url && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={item.image_url}
+                        alt={`Photo of ${item.title}`}
+                        loading="lazy"
+                        className="max-h-72 w-full bg-slate-100 object-contain"
+                      />
+                    )}
+
+                    <div className="p-5">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <h3 className="text-lg font-bold">{item.title}</h3>
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-bold uppercase ${
+                            item.item_type.toLowerCase() === "found"
+                              ? "bg-green-100 text-green-700"
+                              : "bg-amber-100 text-amber-700"
+                          }`}
+                        >
+                          {item.item_type}
+                        </span>
+                      </div>
+
+                      {item.description && (
+                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-600">
+                          {item.description}
+                        </p>
+                      )}
+
+                      {item.location && (
+                        <p className="mt-3 text-sm text-slate-600">
+                          📍 {item.location}
+                        </p>
+                      )}
+
+                      <p className="mt-3 text-xs text-slate-400">
+                        Reported {new Date(item.created_at).toLocaleString()}
+                      </p>
                     </div>
-
-                    {item.description && (
-                      <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-600">
-                        {item.description}
-                      </p>
-                    )}
-
-                    {item.location && (
-                      <p className="mt-3 text-sm text-slate-600">
-                        📍 {item.location}
-                      </p>
-                    )}
-
-                    <p className="mt-3 text-xs text-slate-400">
-                      Reported {new Date(item.created_at).toLocaleString()}
-                    </p>
                   </article>
                 ))}
               </div>
