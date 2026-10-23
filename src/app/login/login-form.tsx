@@ -54,11 +54,23 @@ export default function LoginForm({ role }: { role: "student" | "teacher" }) {
           .eq("id", data.user.id)
           .maybeSingle();
 
-        if (profileError || !profile) {
-          await supabase.auth.signOut();
-          setMessage("Could not verify your profile. Please contact the administrator.");
-          return;
-        }
+        if (profileError) {
+  console.error("Profile verification error:", profileError);
+  await supabase.auth.signOut();
+
+  setMessage(
+    `Profile query failed: ${profileError.message} (Code: ${profileError.code})`
+  );
+  return;
+}
+
+if (!profile) {
+  await supabase.auth.signOut();
+  setMessage(
+    "No profile was found for this account. Please contact the administrator."
+  );
+  return;
+}
 
         if (role === "teacher") {
           if (profile.role !== "teacher" && profile.role !== "admin") {
