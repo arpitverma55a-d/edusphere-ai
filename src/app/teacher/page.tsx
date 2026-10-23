@@ -2,7 +2,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "../lib/supabase/client";
 
 type Course = {
@@ -11,441 +10,433 @@ type Course = {
   course_code: string;
 };
 
-export default function TeacherPage() {
-  const router = useRouter();
+type Student = {
+  id: string;
+  full_name: string | null;
+};
 
-  const [email, setEmail] = useState("");
+type AttendanceStatus = "present" | "absent";
+
+export default function TeacherPage() {
+  const [supabase] = useState(() => createClient());
+
+  const [userId, setUserId] = useState("");
   const [courses, setCourses] = useState<Course[]>([]);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [selectedCourse, setSelectedCourse] = useState("");
+  const [attendanceDate, setAttendanceDate] = useState(
+    new Date().toLocaleDateString("en-CA")
+  );
+  const [attendance, setAttendance] = useState<
+    Record<string, AttendanceStatus>
+  >({});
+
   const [courseName, setCourseName] = useState("");
   const [courseCode, setCourseCode] = useState("");
   const [studentId, setStudentId] = useState("");
-  const [selectedCourseId, setSelectedCourseId] = useState("");
+  const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [enrolling, setEnrolling] = useState(false);
-  const [message, setMessage] = useState("");
-  const [enrollmentMessage, setEnrollmentMessage] = useState("");
-  const [authorized, setAuthorized] = useState(false);
 
-  const loadCourses = useCallback(async () => {
-    const supabase = createClient();
-
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      router.replace("/login?role=teacher");
-      return;
-    }
-
-    setEmail(user.email ?? "");
-
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    if (profileError || !profile) {
-      setMessage("Could not verify your profile. Please contact the administrator.");
-      setLoading(false);
-      return;
-    }
-
-    if (profile.role !== "teacher" && profile.role !== "admin") {
-      router.replace("/login?role=teacher");
-      return;
-    }
-
-    setAuthorized(true);
-
+  const loadCourses = useCallback(async (teacherId: string) => {
     const { data, error } = await supabase
       .from("courses")
       .select("id, name, course_code")
-      .eq("teacher_id", user.id)
+      .eq("teacher_id", teacherId)
       .order("name");
 
     if (error) {
-      setMessage(`Could not load courses: ${error.message}`);
-    } else {
-      setCourses(data ?? []);
-      setSelectedCourseId((current) => {
-        if (data?.some((course) => course.id === current)) return current;
-        return data?.[0]?.id ?? "";
-      });
+      setMessage("Could not load courses: " + error.message);
+      return;
     }
 
-    setLoading(false);
-  }, [router]);
+    const list = (data ?? []) as Course[];
+    setCourses(list);
+
+    setSelectedCourse((current) => {
+      if (current && list.some((course) => course.id === current)) {
+        return current;
+      }
+      return list[0]?.id ?? "";
+    });
+  }, [supabase]);
+
+  const loadStudents = useCallback(async () => {
+    if (!selectedCourse) {
+      setStudents([]);
+      setAttendance({});
+      return;
+    }
+
+    const { data: enrollments, error } = await supabase
+      .from("course_enrollments")
+      .select("student_id")
+      .eq("course_id", selectedCourse);
+
+    if (error) {
+      setMessage("Could not load enrolled students: " + error.message);
+      return;
+    }
+
+    const ids = (enrollments ?? []).map((item) => item.student_id as string);
+
+    if (ids.length === 0) {
+      setStudents([]);
+      setAttendance({});
+      return;
+    }
+
+    const { data: profiles, error: profilesError } = await supabase
+      .from("profiles")
+      .select("id, full_name")
+      .in("id", ids);
+
+    if (profilesError) {
+      setMessage("Could not load student profiles: " + profilesError.message);
+      return;
+    }
+
+    setStudents((profiles ?? []) as Student[]);
+
+    const { data: records, error: attendanceError } = await supabase
+      .from("attendance")
+      .select("student_id, status")
+      .eq("course_id", selectedCourse)
+      .eq("class_date", attendanceDate);
+
+    if (attendanceError) {
+      setMessage("Could not load attendance: " + attendanceError.message);
+      return;
+    }
+
+    const saved: Record<string, AttendanceStatus> = {};
+    for (const record of records ?? []) {
+      if (record.status === "present" || record.status === "absent") {
+        saved[record.student_id] = record.status;
+      }
+    }
+
+    setAttendance(saved);
+  }, [supabase, selectedCourse, attendanceDate]);
 
   useEffect(() => {
-    void loadCourses();
-  }, [loadCourses]);
+    let active = true;
 
-  async function createCourse(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setMessage("");
-    setSaving(true);
+    async function initialize() {
+      const { data, error } = await supabase.auth.getUser();
 
-    try {
-      const supabase = createClient();
+      if (!active) return;
 
-      const {
-        data: { user },
-        error: authError,
-      } = await supabase.auth.getUser();
-
-      if (authError || !user) {
-        router.replace("/login?role=teacher");
+      if (error || !data.user) {
+        window.location.href = "/login?role=teacher";
         return;
       }
 
       const { data: profile, error: profileError } = await supabase
         .from("profiles")
         .select("role")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (
-        profileError ||
-        !profile ||
-        (profile.role !== "teacher" && profile.role !== "admin")
-      ) {
-        setMessage("Your account is not authorized to create courses.");
-        return;
-      }
-
-      const name = courseName.trim();
-      const code = courseCode.trim().toUpperCase();
-
-      if (!name || !code) {
-        setMessage("Please enter both a course name and course code.");
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from("courses")
-        .insert({
-          name,
-          course_code: code,
-          teacher_id: user.id,
-        })
-        .select("id, name, course_code")
+        .eq("id", data.user.id)
         .single();
 
-      if (error) throw error;
+      if (!active) return;
 
-      setCourses((current) =>
-        [...current, data].sort((a, b) => a.name.localeCompare(b.name))
-      );
-      setSelectedCourseId(data.id);
-      setCourseName("");
-      setCourseCode("");
-      setMessage("Course created successfully!");
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? `Could not create course: ${error.message}`
-          : "Something went wrong while creating the course."
-      );
-    } finally {
-      setSaving(false);
+      if (profileError || !profile || !["teacher", "admin"].includes(profile.role)) {
+        setMessage("This page is only available to teacher accounts.");
+        setLoading(false);
+        return;
+      }
+
+      setUserId(data.user.id);
+      await loadCourses(data.user.id);
+
+      if (active) setLoading(false);
     }
+
+    void initialize();
+
+    return () => {
+      active = false;
+    };
+  }, [supabase, loadCourses]);
+
+  useEffect(() => {
+    void loadStudents();
+  }, [loadStudents]);
+
+  async function createCourse(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage("");
+
+    if (!userId) return;
+
+    const { error } = await supabase.from("courses").insert({
+      name: courseName.trim(),
+      course_code: courseCode.trim().toUpperCase(),
+      teacher_id: userId,
+    });
+
+    if (error) {
+      setMessage("Could not create course: " + error.message);
+      return;
+    }
+
+    setCourseName("");
+    setCourseCode("");
+    setMessage("Course created successfully.");
+    await loadCourses(userId);
   }
 
-  async function enrollStudent(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setEnrollmentMessage("");
-    setEnrolling(true);
+  async function enrollStudent(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage("");
 
-    try {
-      const supabase = createClient();
-
-      const {
-        data: { user },
-        error: authError,
-      } = await supabase.auth.getUser();
-
-      if (authError || !user) {
-        router.replace("/login?role=teacher");
-        return;
-      }
-
-      const { data: profile, error: profileError } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (
-        profileError ||
-        !profile ||
-        (profile.role !== "teacher" && profile.role !== "admin")
-      ) {
-        setEnrollmentMessage("Your account is not authorized to enroll students.");
-        return;
-      }
-
-      if (!selectedCourseId) {
-        setEnrollmentMessage("Please create or select a course first.");
-        return;
-      }
-
-      const normalizedId = studentId.trim();
-
-      const uuidPattern =
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-      if (!uuidPattern.test(normalizedId)) {
-        setEnrollmentMessage("Please enter a valid student profile UUID.");
-        return;
-      }
-
-      const { error } = await supabase
-        .from("course_enrollments")
-        .insert({
-          student_id: normalizedId,
-          course_id: selectedCourseId,
-        });
-
-      if (error) {
-        if (error.code === "23505") {
-          setEnrollmentMessage("This student is already enrolled in that course.");
-          return;
-        }
-
-        if (error.code === "23503") {
-          setEnrollmentMessage("The student UUID or selected course does not exist.");
-          return;
-        }
-
-        if (error.code === "42501") {
-          setEnrollmentMessage(
-            "Enrollment was blocked by database security. Apply the enrollment policy in Step 2 below, then try again."
-          );
-          return;
-        }
-
-        throw error;
-      }
-
-      const course = courses.find((item) => item.id === selectedCourseId);
-
-      setEnrollmentMessage(
-        `Student enrolled successfully${course ? ` in ${course.name}` : ""}.`
-      );
-      setStudentId("");
-    } catch (error) {
-      setEnrollmentMessage(
-        error instanceof Error
-          ? `Enrollment failed: ${error.message}`
-          : "Enrollment failed. Please try again."
-      );
-    } finally {
-      setEnrolling(false);
+    if (!selectedCourse || !studentId.trim()) {
+      setMessage("Select a course and enter the student's profile UUID.");
+      return;
     }
+
+    const { error } = await supabase.from("course_enrollments").insert({
+      course_id: selectedCourse,
+      student_id: studentId.trim(),
+    });
+
+    if (error) {
+      setMessage(
+        error.code === "23505"
+          ? "This student is already enrolled in this course."
+          : "Could not enroll student: " + error.message
+      );
+      return;
+    }
+
+    setStudentId("");
+    setMessage("Student enrolled successfully.");
+    await loadStudents();
+  }
+
+  async function saveAttendance() {
+    setMessage("");
+
+    if (!selectedCourse || !attendanceDate || students.length === 0) {
+      setMessage("Select a course with enrolled students first.");
+      return;
+    }
+
+    if (students.some((student) => !attendance[student.id])) {
+      setMessage("Mark every student Present or Absent before saving.");
+      return;
+    }
+
+    setSaving(true);
+
+    const rows = students.map((student) => ({
+      student_id: student.id,
+      course_id: selectedCourse,
+      class_date: attendanceDate,
+      status: attendance[student.id],
+    }));
+
+    const { error } = await supabase
+      .from("attendance")
+      .upsert(rows, {
+        onConflict: "student_id,course_id,class_date",
+      });
+
+    setSaving(false);
+
+    if (error) {
+      setMessage("Could not save attendance: " + error.message);
+      return;
+    }
+
+    setMessage("Attendance saved successfully.");
   }
 
   async function signOut() {
-    const supabase = createClient();
     await supabase.auth.signOut();
-    router.replace("/login?role=teacher");
+    window.location.href = "/login";
   }
 
   if (loading) {
-    return (
-      <main className="min-h-screen bg-slate-950 p-8 text-white">
-        Loading Teacher Portal...
-      </main>
-    );
-  }
-
-  if (!authorized) {
-    return (
-      <main className="min-h-screen bg-slate-950 p-8 text-white">
-        <p>{message || "Verifying your account..."}</p>
-      </main>
-    );
+    return <main className="p-8">Loading teacher portal...</main>;
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 px-4 py-10 text-white sm:px-8">
-      <div className="mx-auto max-w-5xl">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <p className="font-bold tracking-widest text-cyan-400">
-              EDUSPHERE AI
-            </p>
-            <h1 className="mt-3 text-3xl font-bold">Teacher Portal</h1>
-            <p className="mt-2 text-slate-400">Signed in as {email}</p>
-          </div>
+    <main className="mx-auto max-w-5xl space-y-8 p-6">
+      <header className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold">Teacher Portal</h1>
+          <p className="mt-1 text-gray-600">
+            Manage courses, enrollments, and daily attendance.
+          </p>
+        </div>
+        <button
+          onClick={signOut}
+          className="rounded-lg border px-4 py-2"
+        >
+          Sign out
+        </button>
+      </header>
 
-          <div className="flex gap-3">
-            <button
-              onClick={() => router.push("/")}
-              className="rounded-lg border border-slate-700 px-4 py-2 hover:bg-slate-800"
+      {message && (
+        <p className="rounded-lg border p-3 text-sm" role="status">
+          {message}
+        </p>
+      )}
+
+      <section className="space-y-4 rounded-xl border p-5">
+        <h2 className="text-xl font-semibold">Create a course</h2>
+        <form onSubmit={createCourse} className="grid gap-3 sm:grid-cols-3">
+          <input
+            className="rounded-lg border p-3"
+            placeholder="Course name"
+            value={courseName}
+            onChange={(event) => setCourseName(event.target.value)}
+            required
+          />
+          <input
+            className="rounded-lg border p-3"
+            placeholder="Course code (e.g. CSE101)"
+            value={courseCode}
+            onChange={(event) => setCourseCode(event.target.value)}
+            required
+          />
+          <button className="rounded-lg bg-blue-600 p-3 text-white">
+            Create course
+          </button>
+        </form>
+      </section>
+
+      <section className="space-y-4 rounded-xl border p-5">
+        <h2 className="text-xl font-semibold">Enroll a student</h2>
+        <p className="text-sm text-gray-600">
+          Enter the student's profile UUID from Supabase. The student must
+          already have an account.
+        </p>
+        <form onSubmit={enrollStudent} className="flex flex-col gap-3 sm:flex-row">
+          <select
+            className="rounded-lg border p-3"
+            value={selectedCourse}
+            onChange={(event) => setSelectedCourse(event.target.value)}
+            required
+          >
+            {courses.map((course) => (
+              <option key={course.id} value={course.id}>
+                {course.name} ({course.course_code})
+              </option>
+            ))}
+          </select>
+          <input
+            className="min-w-0 flex-1 rounded-lg border p-3"
+            placeholder="Student profile UUID"
+            value={studentId}
+            onChange={(event) => setStudentId(event.target.value)}
+            required
+          />
+          <button className="rounded-lg bg-blue-600 p-3 text-white">
+            Enroll student
+          </button>
+        </form>
+      </section>
+
+      <section className="space-y-4 rounded-xl border p-5">
+        <h2 className="text-xl font-semibold">Mark attendance</h2>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1">
+            <span className="block text-sm font-medium">Course</span>
+            <select
+              className="w-full rounded-lg border p-3"
+              value={selectedCourse}
+              onChange={(event) => setSelectedCourse(event.target.value)}
             >
-              Home
-            </button>
-            <button
-              onClick={signOut}
-              className="rounded-lg bg-cyan-400 px-4 py-2 font-semibold text-slate-950 hover:bg-cyan-300"
-            >
-              Sign out
-            </button>
-          </div>
+              {courses.map((course) => (
+                <option key={course.id} value={course.id}>
+                  {course.name} ({course.course_code})
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="space-y-1">
+            <span className="block text-sm font-medium">Attendance date</span>
+            <input
+              type="date"
+              className="w-full rounded-lg border p-3"
+              value={attendanceDate}
+              onChange={(event) => setAttendanceDate(event.target.value)}
+              required
+            />
+          </label>
         </div>
 
-        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
-          <h2 className="text-xl font-semibold">Create a course</h2>
-          <p className="mt-2 text-sm text-slate-400">
-            Add a course that you teach. Course codes must be unique.
+        {students.length === 0 ? (
+          <p className="text-gray-600">
+            No enrolled students found for this course.
           </p>
-
-          <form
-            onSubmit={createCourse}
-            className="mt-6 grid gap-4 sm:grid-cols-2"
-          >
-            <div>
-              <label htmlFor="courseName" className="mb-2 block text-sm">
-                Course name
-              </label>
-              <input
-                id="courseName"
-                required
-                maxLength={100}
-                value={courseName}
-                onChange={(e) => setCourseName(e.target.value)}
-                placeholder="e.g. Database Management Systems"
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 outline-none focus:border-cyan-400"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="courseCode" className="mb-2 block text-sm">
-                Course code
-              </label>
-              <input
-                id="courseCode"
-                required
-                maxLength={30}
-                value={courseCode}
-                onChange={(e) =>
-                  setCourseCode(e.target.value.toUpperCase().replace(/\s+/g, ""))
-                }
-                placeholder="e.g. CSE102"
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 outline-none focus:border-cyan-400"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={saving}
-              className="rounded-lg bg-cyan-400 px-5 py-3 font-semibold text-slate-950 hover:bg-cyan-300 disabled:opacity-50 sm:col-span-2"
-            >
-              {saving ? "Creating course..." : "Create course"}
-            </button>
-          </form>
-
-          {message && (
-            <p role="status" className="mt-4 rounded-lg bg-slate-800 p-3 text-sm">
-              {message}
-            </p>
-          )}
-        </section>
-
-        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
-          <h2 className="text-xl font-semibold">Enroll a student</h2>
-          <p className="mt-2 text-sm text-slate-400">
-            Enter the student's profile UUID and select one of your courses.
-          </p>
-
-          <form onSubmit={enrollStudent} className="mt-5 space-y-4">
-            <div>
-              <label htmlFor="enrollmentCourse" className="mb-2 block text-sm">
-                Course
-              </label>
-              <select
-                id="enrollmentCourse"
-                required
-                value={selectedCourseId}
-                onChange={(e) => setSelectedCourseId(e.target.value)}
-                disabled={courses.length === 0}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 outline-none focus:border-cyan-400 disabled:opacity-50"
-              >
-                {courses.length === 0 && <option value="">Create a course first</option>}
-                {courses.map((course) => (
-                  <option key={course.id} value={course.id}>
-                    {course.course_code} — {course.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label htmlFor="studentId" className="mb-2 block text-sm">
-                Student profile UUID
-              </label>
-              <input
-                id="studentId"
-                required
-                value={studentId}
-                onChange={(e) => setStudentId(e.target.value)}
-                placeholder="Paste the student's profile UUID"
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 outline-none focus:border-cyan-400"
-              />
-              <p className="mt-2 text-xs text-slate-400">
-                Use the UUID from public.profiles. Only enroll students you are authorized to manage.
-              </p>
-            </div>
-
-            <button
-              type="submit"
-              disabled={enrolling || courses.length === 0}
-              className="w-full rounded-lg bg-cyan-400 px-5 py-3 font-semibold text-slate-950 hover:bg-cyan-300 disabled:opacity-50"
-            >
-              {enrolling ? "Enrolling student..." : "Enroll student"}
-            </button>
-          </form>
-
-          {enrollmentMessage && (
-            <p role="status" className="mt-4 rounded-lg bg-slate-800 p-3 text-sm">
-              {enrollmentMessage}
-            </p>
-          )}
-        </section>
-
-        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
-          <div className="flex items-center justify-between gap-4">
-            <h2 className="text-xl font-semibold">Your courses</h2>
-            <span className="rounded-full bg-slate-800 px-3 py-1 text-sm text-cyan-300">
-              {courses.length} total
-            </span>
-          </div>
-
-          {courses.length === 0 ? (
-            <p className="mt-5 rounded-lg bg-slate-800 p-4 text-slate-300">
-              No courses yet. Create your first course using the form above.
-            </p>
-          ) : (
-            <div className="mt-5 grid gap-4 sm:grid-cols-2">
-              {courses.map((course) => (
-                <article
-                  key={course.id}
-                  className="rounded-xl border border-slate-700 bg-slate-950 p-5"
+        ) : (
+          <>
+            <div className="space-y-3">
+              {students.map((student) => (
+                <div
+                  key={student.id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3"
                 >
-                  <p className="text-sm font-semibold text-cyan-400">
-                    {course.course_code}
-                  </p>
-                  <h3 className="mt-2 text-lg font-semibold">{course.name}</h3>
-                </article>
+                  <div>
+                    <p className="font-medium">
+                      {student.full_name || "Unnamed student"}
+                    </p>
+                    <p className="text-xs text-gray-500">{student.id}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAttendance((current) => ({
+                          ...current,
+                          [student.id]: "present",
+                        }))
+                      }
+                      className={`rounded-lg border px-4 py-2 ${
+                        attendance[student.id] === "present"
+                          ? "bg-green-600 text-white"
+                          : ""
+                      }`}
+                    >
+                      Present
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAttendance((current) => ({
+                          ...current,
+                          [student.id]: "absent",
+                        }))
+                      }
+                      className={`rounded-lg border px-4 py-2 ${
+                        attendance[student.id] === "absent"
+                          ? "bg-red-600 text-white"
+                          : ""
+                      }`}
+                    >
+                      Absent
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
-          )}
-        </section>
-      </div>
+
+            <button
+              type="button"
+              disabled={saving}
+              onClick={saveAttendance}
+              className="rounded-lg bg-blue-600 px-5 py-3 text-white disabled:opacity-50"
+            >
+              {saving ? "Saving..." : "Save Attendance"}
+            </button>
+          </>
+        )}
+      </section>
     </main>
   );
 }
