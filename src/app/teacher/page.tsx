@@ -18,9 +18,13 @@ export default function TeacherPage() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [courseName, setCourseName] = useState("");
   const [courseCode, setCourseCode] = useState("");
+  const [studentId, setStudentId] = useState("");
+  const [selectedCourseId, setSelectedCourseId] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [enrolling, setEnrolling] = useState(false);
   const [message, setMessage] = useState("");
+  const [enrollmentMessage, setEnrollmentMessage] = useState("");
   const [authorized, setAuthorized] = useState(false);
 
   const loadCourses = useCallback(async () => {
@@ -67,6 +71,10 @@ export default function TeacherPage() {
       setMessage(`Could not load courses: ${error.message}`);
     } else {
       setCourses(data ?? []);
+      setSelectedCourseId((current) => {
+        if (data?.some((course) => course.id === current)) return current;
+        return data?.[0]?.id ?? "";
+      });
     }
 
     setLoading(false);
@@ -132,6 +140,7 @@ export default function TeacherPage() {
       setCourses((current) =>
         [...current, data].sort((a, b) => a.name.localeCompare(b.name))
       );
+      setSelectedCourseId(data.id);
       setCourseName("");
       setCourseCode("");
       setMessage("Course created successfully!");
@@ -143,6 +152,99 @@ export default function TeacherPage() {
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function enrollStudent(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setEnrollmentMessage("");
+    setEnrolling(true);
+
+    try {
+      const supabase = createClient();
+
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+
+      if (authError || !user) {
+        router.replace("/login?role=teacher");
+        return;
+      }
+
+      const { data: profile, error: profileError } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (
+        profileError ||
+        !profile ||
+        (profile.role !== "teacher" && profile.role !== "admin")
+      ) {
+        setEnrollmentMessage("Your account is not authorized to enroll students.");
+        return;
+      }
+
+      if (!selectedCourseId) {
+        setEnrollmentMessage("Please create or select a course first.");
+        return;
+      }
+
+      const normalizedId = studentId.trim();
+
+      const uuidPattern =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+      if (!uuidPattern.test(normalizedId)) {
+        setEnrollmentMessage("Please enter a valid student profile UUID.");
+        return;
+      }
+
+      const { error } = await supabase
+        .from("course_enrollments")
+        .insert({
+          student_id: normalizedId,
+          course_id: selectedCourseId,
+        });
+
+      if (error) {
+        if (error.code === "23505") {
+          setEnrollmentMessage("This student is already enrolled in that course.");
+          return;
+        }
+
+        if (error.code === "23503") {
+          setEnrollmentMessage("The student UUID or selected course does not exist.");
+          return;
+        }
+
+        if (error.code === "42501") {
+          setEnrollmentMessage(
+            "Enrollment was blocked by database security. Apply the enrollment policy in Step 2 below, then try again."
+          );
+          return;
+        }
+
+        throw error;
+      }
+
+      const course = courses.find((item) => item.id === selectedCourseId);
+
+      setEnrollmentMessage(
+        `Student enrolled successfully${course ? ` in ${course.name}` : ""}.`
+      );
+      setStudentId("");
+    } catch (error) {
+      setEnrollmentMessage(
+        error instanceof Error
+          ? `Enrollment failed: ${error.message}`
+          : "Enrollment failed. Please try again."
+      );
+    } finally {
+      setEnrolling(false);
     }
   }
 
@@ -202,7 +304,10 @@ export default function TeacherPage() {
             Add a course that you teach. Course codes must be unique.
           </p>
 
-          <form onSubmit={createCourse} className="mt-6 grid gap-4 sm:grid-cols-2">
+          <form
+            onSubmit={createCourse}
+            className="mt-6 grid gap-4 sm:grid-cols-2"
+          >
             <div>
               <label htmlFor="courseName" className="mb-2 block text-sm">
                 Course name
@@ -228,11 +333,9 @@ export default function TeacherPage() {
                 maxLength={30}
                 value={courseCode}
                 onChange={(e) =>
-                  setCourseCode(
-                    e.target.value.toUpperCase().replace(/\s+/g, "")
-                  )
+                  setCourseCode(e.target.value.toUpperCase().replace(/\s+/g, ""))
                 }
-                placeholder="e.g. CSE101"
+                placeholder="e.g. CSE102"
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 outline-none focus:border-cyan-400"
               />
             </div>
@@ -249,6 +352,67 @@ export default function TeacherPage() {
           {message && (
             <p role="status" className="mt-4 rounded-lg bg-slate-800 p-3 text-sm">
               {message}
+            </p>
+          )}
+        </section>
+
+        <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
+          <h2 className="text-xl font-semibold">Enroll a student</h2>
+          <p className="mt-2 text-sm text-slate-400">
+            Enter the student's profile UUID and select one of your courses.
+          </p>
+
+          <form onSubmit={enrollStudent} className="mt-5 space-y-4">
+            <div>
+              <label htmlFor="enrollmentCourse" className="mb-2 block text-sm">
+                Course
+              </label>
+              <select
+                id="enrollmentCourse"
+                required
+                value={selectedCourseId}
+                onChange={(e) => setSelectedCourseId(e.target.value)}
+                disabled={courses.length === 0}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 outline-none focus:border-cyan-400 disabled:opacity-50"
+              >
+                {courses.length === 0 && <option value="">Create a course first</option>}
+                {courses.map((course) => (
+                  <option key={course.id} value={course.id}>
+                    {course.course_code} — {course.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="studentId" className="mb-2 block text-sm">
+                Student profile UUID
+              </label>
+              <input
+                id="studentId"
+                required
+                value={studentId}
+                onChange={(e) => setStudentId(e.target.value)}
+                placeholder="Paste the student's profile UUID"
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 outline-none focus:border-cyan-400"
+              />
+              <p className="mt-2 text-xs text-slate-400">
+                Use the UUID from public.profiles. Only enroll students you are authorized to manage.
+              </p>
+            </div>
+
+            <button
+              type="submit"
+              disabled={enrolling || courses.length === 0}
+              className="w-full rounded-lg bg-cyan-400 px-5 py-3 font-semibold text-slate-950 hover:bg-cyan-300 disabled:opacity-50"
+            >
+              {enrolling ? "Enrolling student..." : "Enroll student"}
+            </button>
+          </form>
+
+          {enrollmentMessage && (
+            <p role="status" className="mt-4 rounded-lg bg-slate-800 p-3 text-sm">
+              {enrollmentMessage}
             </p>
           )}
         </section>
@@ -275,9 +439,7 @@ export default function TeacherPage() {
                   <p className="text-sm font-semibold text-cyan-400">
                     {course.course_code}
                   </p>
-                  <h3 className="mt-2 text-lg font-semibold">
-                    {course.name}
-                  </h3>
+                  <h3 className="mt-2 text-lg font-semibold">{course.name}</h3>
                 </article>
               ))}
             </div>
