@@ -32,6 +32,10 @@ type CourseRecord = {
   name: string;
 };
 
+type EnrollmentRecord = {
+  course_id: string;
+};
+
 export default function StudentPage() {
   const router = useRouter();
 
@@ -44,6 +48,7 @@ export default function StudentPage() {
   const [marks, setMarks] = useState<MarkRecord[]>([]);
   const [assignments, setAssignments] = useState<AssignmentRecord[]>([]);
   const [courses, setCourses] = useState<CourseRecord[]>([]);
+  const [enrolledCourseIds, setEnrolledCourseIds] = useState<string[]>([]);
 
   const loadDashboard = useCallback(async () => {
     const supabase = createClient();
@@ -61,49 +66,60 @@ export default function StudentPage() {
 
     const userId = authData.user.id;
 
-    const [attendanceResult, marksResult, assignmentsResult, coursesResult] =
-      await Promise.all([
-        supabase
-          .from("attendance")
-          .select("id, status, class_date, course_id")
-          .eq("student_id", userId)
-          .order("class_date", { ascending: false }),
+    const [
+      attendanceResult,
+      marksResult,
+      assignmentsResult,
+      coursesResult,
+      enrollmentsResult,
+    ] = await Promise.all([
+      supabase
+        .from("attendance")
+        .select("id, status, class_date, course_id")
+        .eq("student_id", userId)
+        .order("class_date", { ascending: false }),
 
-        supabase
-          .from("marks")
-          .select("id, subject, score, max_score")
-          .eq("student_id", userId),
+      supabase
+        .from("marks")
+        .select("id, subject, score, max_score")
+        .eq("student_id", userId),
 
-        // The existing schema has no student submission table yet.
-        // This lists course assignments; it does not claim submission status.
-        supabase
-          .from("assignments")
-          .select("id, title, description, due_at, course_id")
-          .order("due_at", { ascending: true }),
+      supabase
+        .from("assignments")
+        .select("id, title, description, due_at, course_id")
+        .order("due_at", { ascending: true }),
 
-        supabase.from("courses").select("id, name"),
-      ]);
+      supabase.from("courses").select("id, name"),
+
+      supabase
+        .from("course_enrollments")
+        .select("course_id")
+        .eq("student_id", userId),
+    ]);
 
     const firstError =
       attendanceResult.error ??
       marksResult.error ??
       assignmentsResult.error ??
-      coursesResult.error;
+      coursesResult.error ??
+      enrollmentsResult.error;
 
     if (firstError) {
       setErrorMessage(
-        "Some dashboard data could not be loaded. Check your Supabase tables and Row Level Security (RLS) policies, then refresh."
+        `Some dashboard data could not be loaded: ${firstError.message}. Check your Supabase RLS policies.`
       );
     }
 
-    setAttendance(
-      (attendanceResult.data ?? []) as AttendanceRecord[]
-    );
+    setAttendance((attendanceResult.data ?? []) as AttendanceRecord[]);
     setMarks((marksResult.data ?? []) as MarkRecord[]);
-    setAssignments(
-      (assignmentsResult.data ?? []) as AssignmentRecord[]
-    );
+    setAssignments((assignmentsResult.data ?? []) as AssignmentRecord[]);
     setCourses((coursesResult.data ?? []) as CourseRecord[]);
+
+    setEnrolledCourseIds(
+      ((enrollmentsResult.data ?? []) as EnrollmentRecord[]).map(
+        (enrollment) => enrollment.course_id
+      )
+    );
   }, [router]);
 
   useEffect(() => {
@@ -122,6 +138,7 @@ export default function StudentPage() {
 
   async function refreshDashboard() {
     setRefreshing(true);
+
     try {
       await loadDashboard();
     } catch {
@@ -139,7 +156,9 @@ export default function StudentPage() {
   }
 
   const attended = attendance.filter(
-    (record) => record.status === "present" || record.status === "late"
+    (record) =>
+      record.status.toLowerCase() === "present" ||
+      record.status.toLowerCase() === "late"
   ).length;
 
   const totalClasses = attendance.length;
@@ -151,7 +170,7 @@ export default function StudentPage() {
 
   const classesNeeded =
     attendancePercentage !== null && attendancePercentage < 75
-      ? Math.ceil(3 * totalClasses - 4 * attended)
+      ? Math.max(0, Math.ceil((75 * totalClasses - 100 * attended) / 25))
       : 0;
 
   const totalScore = marks.reduce(
@@ -183,8 +202,36 @@ export default function StudentPage() {
 
   function courseName(courseId: string | null) {
     if (!courseId) return "General";
-    return courses.find((course) => course.id === courseId)?.name ??
-      "Course";
+
+    return (
+      courses.find((course) => course.id === courseId)?.name ?? "Course"
+    );
+  }
+
+  const enrolledCourses = courses.filter((course) =>
+    enrolledCourseIds.includes(course.id)
+  );
+
+  function getCourseAttendance(courseId: string) {
+    const records = attendance.filter(
+      (record) => record.course_id === courseId
+    );
+
+    const present = records.filter(
+      (record) =>
+        record.status.toLowerCase() === "present" ||
+        record.status.toLowerCase() === "late"
+    ).length;
+
+    return {
+      records,
+      present,
+      total: records.length,
+      percentage:
+        records.length > 0
+          ? Math.round((present / records.length) * 100)
+          : null,
+    };
   }
 
   if (loading) {
@@ -239,7 +286,7 @@ export default function StudentPage() {
 
         <section className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <article className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
-            <p className="text-sm text-slate-400">Attendance</p>
+            <p className="text-sm text-slate-400">Overall attendance</p>
             <p className="mt-3 text-3xl font-bold text-cyan-300">
               {attendancePercentage === null
                 ? "—"
@@ -287,7 +334,7 @@ export default function StudentPage() {
           <article className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
             <h2 className="text-xl font-bold">Attendance overview</h2>
             <p className="mt-2 text-sm text-slate-400">
-              Based on attendance records currently saved in Supabase.
+              Based on attendance records saved by your teachers.
             </p>
 
             {totalClasses === 0 ? (
@@ -306,10 +353,8 @@ export default function StudentPage() {
                   />
                 </div>
 
-                <div className="mt-3 flex justify-between text-sm">
-                  <span className="text-slate-300">
-                    {attended} attended
-                  </span>
+                <div className="mt-3 flex justify-between gap-3 text-sm">
+                  <span className="text-slate-300">{attended} attended</span>
                   <span className="text-slate-400">
                     {totalClasses - attended} not counted as attended
                   </span>
@@ -318,9 +363,9 @@ export default function StudentPage() {
                 {attendancePercentage !== null &&
                   attendancePercentage < 75 && (
                     <p className="mt-4 rounded-lg bg-amber-500/10 p-4 text-sm text-amber-200">
-                      To reach 75%, you need to attend approximately{" "}
-                      {classesNeeded} consecutive future classes, assuming
-                      no more absences and that each future class is counted.
+                      To reach 75%, you need approximately {classesNeeded}{" "}
+                      consecutive future classes with attendance, assuming no
+                      more absences.
                     </p>
                   )}
 
@@ -350,9 +395,7 @@ export default function StudentPage() {
                   const percentage =
                     Number(mark.max_score) > 0
                       ? Math.round(
-                          (Number(mark.score) /
-                            Number(mark.max_score)) *
-                            100
+                          (Number(mark.score) / Number(mark.max_score)) * 100
                         )
                       : 0;
 
@@ -378,6 +421,105 @@ export default function StudentPage() {
               </div>
             )}
           </article>
+        </section>
+
+        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
+          <h2 className="text-xl font-bold">Attendance by course</h2>
+          <p className="mt-2 text-sm text-slate-400">
+            Your attendance percentage is calculated separately for each
+            course.
+          </p>
+
+          {enrolledCourses.length === 0 ? (
+            <p className="mt-5 rounded-lg bg-slate-800/70 p-4 text-sm text-slate-300">
+              No enrolled courses were found for your account.
+            </p>
+          ) : (
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              {enrolledCourses.map((course) => {
+                const summary = getCourseAttendance(course.id);
+
+                return (
+                  <article
+                    key={course.id}
+                    className="rounded-xl border border-slate-700 p-4"
+                  >
+                    <h3 className="font-semibold">{course.name}</h3>
+                    <p className="mt-3 text-2xl font-bold text-cyan-300">
+                      {summary.percentage === null
+                        ? "No records yet"
+                        : `${summary.percentage}%`}
+                    </p>
+                    <p className="mt-1 text-sm text-slate-400">
+                      {summary.present} present out of {summary.total} classes
+                    </p>
+                    <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-700">
+                      <div
+                        className="h-full rounded-full bg-cyan-400"
+                        style={{
+                          width: `${summary.percentage ?? 0}%`,
+                        }}
+                      />
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
+          <h2 className="text-xl font-bold">Attendance history</h2>
+          <p className="mt-2 text-sm text-slate-400">
+            Your latest recorded class dates and attendance statuses.
+          </p>
+
+          {attendance.length === 0 ? (
+            <p className="mt-5 rounded-lg bg-slate-800/70 p-4 text-sm text-slate-300">
+              No attendance history is available yet.
+            </p>
+          ) : (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full min-w-[480px] text-left text-sm">
+                <thead className="text-slate-400">
+                  <tr className="border-b border-slate-700">
+                    <th className="py-3 pr-4">Date</th>
+                    <th className="py-3 pr-4">Course</th>
+                    <th className="py-3">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {attendance.map((record) => (
+                    <tr
+                      key={record.id}
+                      className="border-b border-slate-800 last:border-0"
+                    >
+                      <td className="py-3 pr-4">
+                        {new Date(
+                          `${record.class_date}T00:00:00`
+                        ).toLocaleDateString()}
+                      </td>
+                      <td className="py-3 pr-4">
+                        {courseName(record.course_id)}
+                      </td>
+                      <td className="py-3">
+                        <span
+                          className={`inline-block rounded-full px-3 py-1 text-xs font-semibold ${
+                            record.status.toLowerCase() === "present" ||
+                            record.status.toLowerCase() === "late"
+                              ? "bg-green-500/15 text-green-300"
+                              : "bg-red-500/15 text-red-300"
+                          }`}
+                        >
+                          {record.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
 
         <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
