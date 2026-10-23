@@ -12,6 +12,7 @@ type LostFoundItem = {
   item_type: string;
   location: string | null;
   image_url: string | null;
+  status: "active" | "resolved";
   created_at: string;
 };
 
@@ -20,12 +21,15 @@ const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
 export default function LostFoundPage() {
   const [items, setItems] = useState<LostFoundItem[]>([]);
+  const [userId, setUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("active");
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -43,7 +47,7 @@ export default function LostFoundPage() {
     const { data, error: fetchError } = await supabase
       .from("lost_found_items")
       .select(
-        "id, reported_by, title, description, item_type, location, image_url, created_at"
+        "id, reported_by, title, description, item_type, location, image_url, status, created_at"
       )
       .order("created_at", { ascending: false });
 
@@ -58,7 +62,23 @@ export default function LostFoundPage() {
   }
 
   useEffect(() => {
-    void loadItems();
+    let mounted = true;
+
+    async function initialize() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (mounted) setUserId(user?.id ?? null);
+
+      await loadItems();
+    }
+
+    void initialize();
+
+    return () => {
+      mounted = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -98,7 +118,6 @@ export default function LostFoundPage() {
     }
 
     setSubmitting(true);
-
     let uploadedPath: string | null = null;
 
     try {
@@ -137,11 +156,9 @@ export default function LostFoundPage() {
 
         uploadedPath = filePath;
 
-        const { data: publicUrlData } = supabase.storage
+        imageUrl = supabase.storage
           .from("lost-found-photos")
-          .getPublicUrl(filePath);
-
-        imageUrl = publicUrlData.publicUrl;
+          .getPublicUrl(filePath).data.publicUrl;
       }
 
       const { error: insertError } = await supabase
@@ -153,10 +170,10 @@ export default function LostFoundPage() {
           item_type: itemType,
           location: location.trim() || null,
           image_url: imageUrl,
+          status: "active",
         });
 
       if (insertError) {
-        // If saving the report fails, clean up the uploaded photo.
         if (uploadedPath) {
           await supabase.storage
             .from("lost-found-photos")
@@ -172,7 +189,12 @@ export default function LostFoundPage() {
       setItemType("lost");
       setPhoto(null);
       setPhotoPreview("");
-      setNotice("Your report and photo were submitted successfully!");
+      setNotice("Your report was submitted successfully!");
+
+      const inputElement = document.getElementById(
+        "item-photo"
+      ) as HTMLInputElement | null;
+      if (inputElement) inputElement.value = "";
 
       await loadItems();
     } catch (err) {
@@ -186,15 +208,56 @@ export default function LostFoundPage() {
     }
   }
 
+  async function updateStatus(item: LostFoundItem) {
+    if (item.reported_by !== userId || updatingId) return;
+
+    const nextStatus =
+      item.status === "active" ? "resolved" : "active";
+
+    setError("");
+    setNotice("");
+    setUpdatingId(item.id);
+
+    const { error: updateError } = await supabase
+      .from("lost_found_items")
+      .update({ status: nextStatus })
+      .eq("id", item.id)
+      .eq("reported_by", userId);
+
+    if (updateError) {
+      setError(`Could not update status: ${updateError.message}`);
+    } else {
+      setItems((current) =>
+        current.map((existing) =>
+          existing.id === item.id
+            ? { ...existing, status: nextStatus }
+            : existing
+        )
+      );
+
+      setNotice(
+        nextStatus === "resolved"
+          ? "Item marked as resolved."
+          : "Item moved back to active reports."
+      );
+    }
+
+    setUpdatingId(null);
+  }
+
   const filteredItems = items.filter((item) => {
     const matchesType =
       filter === "all" || item.item_type.toLowerCase() === filter;
+
+    const matchesStatus =
+      statusFilter === "all" || item.status === statusFilter;
 
     const searchableText =
       `${item.title} ${item.description ?? ""} ${item.location ?? ""}`.toLowerCase();
 
     return (
       matchesType &&
+      matchesStatus &&
       searchableText.includes(search.toLowerCase().trim())
     );
   });
@@ -214,7 +277,6 @@ export default function LostFoundPage() {
               Help campus belongings find their way home.
             </p>
           </div>
-
           <a
             href="/"
             className="rounded-xl border border-slate-200 px-4 py-2 font-medium hover:bg-slate-50"
@@ -302,7 +364,7 @@ export default function LostFoundPage() {
                   onChange={(event) =>
                     handlePhotoChange(event.target.files?.[0] ?? null)
                   }
-                  className="block w-full rounded-xl border border-slate-200 p-3 text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-blue-50 file:px-3 file:py-2 file:font-medium file:text-blue-700"
+                  className="block w-full rounded-xl border border-slate-200 p-3 text-sm"
                 />
                 <p className="mt-1 text-xs text-slate-500">
                   JPG, PNG, or WebP. Maximum size: 5 MB.
@@ -310,12 +372,11 @@ export default function LostFoundPage() {
 
                 {photoPreview && (
                   <div className="mt-3">
-                    <p className="mb-2 text-sm font-medium">Photo preview</p>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={photoPreview}
-                      alt="Preview of the selected item"
-                      className="max-h-56 w-full rounded-xl border border-slate-200 object-contain"
+                      alt="Selected item preview"
+                      className="max-h-56 w-full rounded-xl border object-contain"
                     />
                     <button
                       type="button"
@@ -341,7 +402,6 @@ export default function LostFoundPage() {
                   {error}
                 </p>
               )}
-
               {notice && (
                 <p role="status" className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
                   {notice}
@@ -362,7 +422,7 @@ export default function LostFoundPage() {
             <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
               <h2 className="text-xl font-bold">Campus reports</h2>
               <p className="mt-1 text-sm text-slate-500">
-                Search recent lost and found items.
+                Search, filter, and manage your reports.
               </p>
 
               <label htmlFor="search-items" className="sr-only">
@@ -378,7 +438,7 @@ export default function LostFoundPage() {
 
               <div className="mt-3 flex flex-wrap gap-2">
                 {[
-                  { value: "all", label: "All reports" },
+                  { value: "all", label: "All types" },
                   { value: "lost", label: "Lost" },
                   { value: "found", label: "Found" },
                 ].map((option) => (
@@ -397,6 +457,28 @@ export default function LostFoundPage() {
                   </button>
                 ))}
               </div>
+
+              <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
+                {[
+                  { value: "active", label: "Active" },
+                  { value: "resolved", label: "Resolved" },
+                  { value: "all", label: "All statuses" },
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => setStatusFilter(option.value)}
+                    aria-pressed={statusFilter === option.value}
+                    className={`rounded-full px-4 py-2 text-sm font-medium ${
+                      statusFilter === option.value
+                        ? "bg-slate-900 text-white"
+                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             </section>
 
             {loading ? (
@@ -408,7 +490,7 @@ export default function LostFoundPage() {
                 <p className="text-3xl">🔎</p>
                 <h3 className="mt-3 font-semibold">No reports found</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  Try another search or submit the first report.
+                  Try another filter or submit a report.
                 </p>
               </div>
             ) : (
@@ -431,15 +513,26 @@ export default function LostFoundPage() {
                     <div className="p-5">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <h3 className="text-lg font-bold">{item.title}</h3>
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-bold uppercase ${
-                            item.item_type.toLowerCase() === "found"
-                              ? "bg-green-100 text-green-700"
-                              : "bg-amber-100 text-amber-700"
-                          }`}
-                        >
-                          {item.item_type}
-                        </span>
+                        <div className="flex flex-wrap gap-2">
+                          <span
+                            className={`rounded-full px-3 py-1 text-xs font-bold uppercase ${
+                              item.item_type.toLowerCase() === "found"
+                                ? "bg-green-100 text-green-700"
+                                : "bg-amber-100 text-amber-700"
+                            }`}
+                          >
+                            {item.item_type}
+                          </span>
+                          <span
+                            className={`rounded-full px-3 py-1 text-xs font-bold uppercase ${
+                              item.status === "resolved"
+                                ? "bg-slate-200 text-slate-700"
+                                : "bg-blue-100 text-blue-700"
+                            }`}
+                          >
+                            {item.status}
+                          </span>
+                        </div>
                       </div>
 
                       {item.description && (
@@ -447,7 +540,6 @@ export default function LostFoundPage() {
                           {item.description}
                         </p>
                       )}
-
                       {item.location && (
                         <p className="mt-3 text-sm text-slate-600">
                           📍 {item.location}
@@ -457,6 +549,25 @@ export default function LostFoundPage() {
                       <p className="mt-3 text-xs text-slate-400">
                         Reported {new Date(item.created_at).toLocaleString()}
                       </p>
+
+                      {item.reported_by === userId && (
+                        <button
+                          type="button"
+                          disabled={updatingId !== null}
+                          onClick={() => void updateStatus(item)}
+                          className={`mt-4 rounded-xl px-4 py-2 text-sm font-semibold disabled:opacity-50 ${
+                            item.status === "active"
+                              ? "bg-green-600 text-white hover:bg-green-700"
+                              : "border border-slate-300 text-slate-700 hover:bg-slate-50"
+                          }`}
+                        >
+                          {updatingId === item.id
+                            ? "Updating..."
+                            : item.status === "active"
+                              ? "✓ Mark as Returned / Resolved"
+                              : "Reopen report"}
+                        </button>
+                      )}
                     </div>
                   </article>
                 ))}
